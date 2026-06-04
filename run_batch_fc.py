@@ -34,7 +34,13 @@ RUNS = [
     "rfMRI_REST2_LR",
     "rfMRI_REST2_RL",
 ]
-DTSERIES_SUFFIX = "_Atlas_MSMAll_hp2000_clean_rclean_tclean.dtseries.nii"
+
+# Try the more aggressively cleaned version first (from BALSA zip),
+# fall back to the S3 version (downloaded via hcp_s3_download.py)
+DTSERIES_SUFFIXES = [
+    "_Atlas_MSMAll_hp2000_clean_rclean_tclean.dtseries.nii",  # BALSA
+    "_Atlas_MSMAll_hp2000_clean.dtseries.nii",                 # S3
+]
 BEHAVIORAL_CSV = Path(__file__).parent / "behavioral.csv"
 PARCELLATION = hcp.mmp  # 379 non-trivial parcels → 71,631 edges
 
@@ -43,10 +49,15 @@ PARCELLATION = hcp.mmp  # 379 non-trivial parcels → 71,631 edges
 # -------------------------------------------------------
 
 def get_dtseries_path(data_root, subject_id, run):
-    return os.path.join(
-        data_root, str(subject_id), "MNINonLinear", "Results", run,
-        f"{run}{DTSERIES_SUFFIX}"
-    )
+    """Return the first dtseries path that exists, trying BALSA then S3 filename."""
+    for suffix in DTSERIES_SUFFIXES:
+        path = os.path.join(
+            data_root, str(subject_id), "MNINonLinear", "Results", run,
+            f"{run}{suffix}"
+        )
+        if os.path.exists(path):
+            return path
+    return None  # neither found
 
 
 def load_parcel_timeseries(dtseries_path):
@@ -80,7 +91,7 @@ def process_subject(data_root, subject_id):
 
     for run in RUNS:
         path = get_dtseries_path(data_root, subject_id, run)
-        if not os.path.exists(path):
+        if path is None:
             print(f"  [skip run] {run} not found for subject {subject_id}")
             continue
         ts = load_parcel_timeseries(path)
