@@ -5,13 +5,6 @@ SURGE Project — Local FC Pipeline Dashboard
 Run with:
     pip install streamlit plotly
     streamlit run fc_dashboard.py
-
-What it shows:
-  - FC matrix heatmap (360x360 or whatever your parcellation gives)
-  - Edge weight distribution (Fisher-z)
-  - Network-level mean FC breakdown
-  - Motion summary (mean FD per run)
-  - Subject-level stats summary
 """
 
 import streamlit as st
@@ -41,6 +34,16 @@ st.markdown("""
     .metric-value { font-size: 24px; font-weight: 600; }
     .metric-sub { font-size: 11px; color: #aaa; }
     .stPlotlyChart { border-radius: 8px; }
+    .context-box {
+        background-color: #1a1a2e;
+        border-left: 3px solid #534AB7;
+        padding: 12px 16px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: #ccc;
+        line-height: 1.6;
+        margin-bottom: 12px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -51,6 +54,20 @@ st.markdown("""
 with st.sidebar:
     st.title("🧠 FC Dashboard")
     st.caption("SURGE Project · HCP-YA 2025")
+
+    st.markdown("---")
+    st.markdown("**About this project**")
+    st.markdown(
+        "This dashboard visualizes individual resting-state functional connectivity (FC) "
+        "profiles computed from the NIH Human Connectome Project (HCP-YA). "
+        "Each subject's fMRI timeseries is parcellated into brain regions, and pairwise "
+        "correlations between regions form a FC matrix — the subject's unique "
+        "\"connectome fingerprint\" (Finn et al., 2015). These fingerprints are then "
+        "used to predict individual differences in negative affect (anxiety, fear, sadness) "
+        "using Ridge Regression."
+    )
+
+    st.markdown("---")
 
     data_root = st.text_input(
         "Data root directory",
@@ -82,6 +99,9 @@ with st.sidebar:
 
     run_button = st.button("▶ Compute FC", use_container_width=True)
 
+    st.markdown("---")
+    st.caption("Finn et al. (2015) *Nature Neuroscience* — FC fingerprinting using HCP data.")
+
 # -------------------------------------------------------
 # HELPER — load + compute FC
 # -------------------------------------------------------
@@ -97,7 +117,6 @@ def load_motion(data_root, subject_id, run):
 
 @st.cache_data(show_spinner=False)
 def get_mmp_centroids():
-    """Compute MMP parcel centroids in MNI space (cached — only runs once)."""
     coords_l = hcp.mesh.pial_left[0]
     coords_r = hcp.mesh.pial_right[0]
     grayl = np.array(hcp.vertex_info["grayl"])
@@ -164,8 +183,19 @@ def compute_subject_fc(data_root, subject_id, runs, parc_name):
 # MAIN — render dashboard
 # -------------------------------------------------------
 
-st.title(f"Subject {subject_id}")
-st.caption(f"{parcellation_choice} · {len(runs)} run(s) · Fisher-z transformed FC")
+st.title(f"Subject {subject_id} — Functional Connectivity Profile")
+st.caption(f"{parcellation_choice} parcellation · {len(runs)} run(s) · Fisher-z transformed correlations")
+
+# Project overview callout
+st.markdown("""
+<div class="context-box">
+<b>Project overview</b> &mdash; Each row of the fMRI timeseries represents brain activity at one moment in time across 91,282 cortical surface vertices.
+We average those vertices into <b>brain parcels</b> (regions of interest), then compute <b>pairwise Pearson correlations</b> between every pair of parcels' timeseries.
+This produces a symmetric <b>FC matrix</b> whose off-diagonal elements encode the functional connectivity (coupling) between brain regions.
+Correlations are Fisher-z transformed (arctanh) to normalize their distribution before statistical modeling.
+The resulting FC vector &mdash; one value per edge &mdash; is this subject's connectome fingerprint, used downstream to predict negative affect scores.
+</div>
+""", unsafe_allow_html=True)
 
 if run_button or True:
     with st.spinner(f"Computing FC for subject {subject_id}..."):
@@ -184,15 +214,20 @@ if run_button or True:
     col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
-        st.metric("Timepoints", f"{result['n_timepoints']:,}")
+        st.metric("Timepoints", f"{result['n_timepoints']:,}",
+                  help="Total fMRI volumes after concatenating all runs. Finn et al. recommend ≥500 timepoints for stable FC estimates.")
     with col2:
-        st.metric("Parcels", str(n_parcels))
+        st.metric("Parcels", str(n_parcels),
+                  help="Number of brain regions in the selected parcellation. MMP gives 379 cortical parcels (180 per hemisphere + subcortex).")
     with col3:
-        st.metric("FC edges", f"{n_edges:,}")
+        st.metric("FC edges", f"{n_edges:,}",
+                  help="Number of unique pairwise connections = n*(n-1)/2. Each edge is one element of the FC vector used for prediction.")
     with col4:
-        st.metric("Mean FC (z)", f"{fc_vector.mean():.3f}")
+        st.metric("Mean FC (z)", f"{fc_vector.mean():.3f}",
+                  help="Mean Fisher-z across all edges. Positive values indicate overall positive coupling across the brain at rest.")
     with col5:
-        st.metric("Std FC (z)", f"{fc_vector.std():.3f}")
+        st.metric("Std FC (z)", f"{fc_vector.std():.3f}",
+                  help="Spread of edge weights. Higher std = more variability in coupling strength, which aids individual identification.")
 
     st.divider()
 
@@ -200,9 +235,17 @@ if run_button or True:
     col_left, col_right = st.columns([1.8, 1])
 
     with col_left:
-        st.subheader("FC matrix")
+        st.subheader("Functional connectivity matrix")
+        st.markdown("""
+<div class="context-box">
+Each cell (i, j) shows the Fisher-z transformed Pearson correlation between the mean BOLD timeseries of parcel <i>i</i> and parcel <i>j</i>.
+<b>Red</b> = strong positive coupling (regions activate together); <b>blue</b> = anticorrelation (regions suppress each other).
+The block structure along the diagonal reflects known resting-state networks &mdash; regions within the same network
+(e.g., default mode, frontoparietal) tend to show high within-network FC.
+This matrix is the core output of the pipeline; its upper triangle is flattened into the FC vector used for Ridge Regression.
+</div>
+""", unsafe_allow_html=True)
 
-        # Subsample for display if large
         display_n = min(n_parcels, 180)
         step = max(1, n_parcels // display_n)
         z_display = z_matrix[::step, ::step]
@@ -227,7 +270,15 @@ if run_button or True:
         st.plotly_chart(fig_heat, use_container_width=True)
 
     with col_right:
-        st.subheader("Edge distribution")
+        st.subheader("Edge weight distribution")
+        st.markdown("""
+<div class="context-box">
+Distribution of all FC edge values (Fisher-z) for this subject.
+A roughly Gaussian distribution centered near 0 is expected &mdash; most pairs of brain regions have near-zero coupling.
+The positive tail reflects strongly connected pairs (e.g., homotopic regions, within-network edges).
+The negative tail reflects anticorrelated pairs, often seen between the default mode and task-positive networks.
+</div>
+""", unsafe_allow_html=True)
 
         fig_dist = go.Figure(data=go.Histogram(
             x=fc_vector,
@@ -248,8 +299,7 @@ if run_button or True:
         )
         st.plotly_chart(fig_dist, use_container_width=True)
 
-        # Summary stats table
-        st.caption("Edge weight stats")
+        st.caption("Edge weight percentiles")
         stats_df = pd.DataFrame({
             "stat": ["min", "p10", "p25", "median", "p75", "p90", "max"],
             "value": [
@@ -266,7 +316,18 @@ if run_button or True:
 
     # ---- ROW 2: MOTION ----
     if result["motion_per_run"]:
-        st.subheader("Head motion (mean FD per run)")
+        st.divider()
+        st.subheader("Head motion")
+        st.markdown("""
+<div class="context-box">
+Head motion is a major confound in FC analyses &mdash; even small movements correlate artifactually with BOLD signal,
+inflating short-range connections and suppressing long-range ones (Van Dijk et al., 2012).
+The metric shown is <b>framewise displacement (FD)</b>: the mean frame-to-frame RMS displacement across all translational and rotational axes.
+Finn et al. excluded subjects with mean FD &gt; 0.14 mm for behavioral analyses.
+The 0.2 mm threshold here flags runs that may require additional scrubbing before use in the main Ridge Regression pipeline.
+</div>
+""", unsafe_allow_html=True)
+
         motion_cols = st.columns(len(result["motion_per_run"]))
         for i, (run_name, fd_trace) in enumerate(result["motion_per_run"].items()):
             with motion_cols[i]:
@@ -275,7 +336,7 @@ if run_button or True:
                 st.metric(
                     run_name.replace("rfMRI_", ""),
                     f"{mean_fd:.3f} mm",
-                    delta="below threshold" if mean_fd < 0.2 else "above threshold",
+                    delta="✓ below 0.2mm" if mean_fd < 0.2 else "⚠ above 0.2mm",
                     delta_color=color
                 )
 
@@ -301,15 +362,25 @@ if run_button or True:
         )
         st.plotly_chart(fig_motion, use_container_width=True)
 
-    # ---- ROW 3: GLASS BRAIN (MMP only) ----
+    # ---- ROW 3: GLASS BRAIN ----
     if parcellation_choice == "MMP (360)":
         st.divider()
         st.subheader("Glass brain connectome")
+        st.markdown("""
+<div class="context-box">
+This view renders the subject's strongest FC edges projected onto a transparent brain surface,
+viewed from three orthogonal angles (sagittal / coronal / axial).
+Each node is the <b>centroid</b> of an MMP parcel; edge color encodes the sign and magnitude of the Fisher-z connection
+(<b>red</b> = positive, <b>blue</b> = negative). Only the top X% of edges by absolute FC strength are shown.
+Finn et al. found that the <b>frontoparietal</b> and <b>medial frontal</b> networks contribute most to individual
+fingerprinting and behavioral prediction &mdash; look for dense clusters of edges in prefrontal and parietal regions.
+</div>
+""", unsafe_allow_html=True)
 
         edge_pct = st.slider(
             "Show top X% strongest edges",
             min_value=1, max_value=10, value=1, step=1,
-            help="Higher = more edges shown"
+            help="Top 1% shows the ~716 strongest connections. Higher percentages reveal more of the network structure."
         )
 
         with st.spinner("Rendering glass brain..."):
@@ -358,18 +429,29 @@ if run_button or True:
 
         st.image(buf, use_container_width=True)
 
-        st.download_button(
-            "Download glass brain (.png)",
-            data=buf.getvalue(),
-            file_name=f"{subject_id}_glass_brain_top{edge_pct}pct.png",
-            mime="image/png"
-        )
+        col_dl_gb, _ = st.columns([1, 3])
+        with col_dl_gb:
+            st.download_button(
+                "Download glass brain (.png)",
+                data=buf.getvalue(),
+                file_name=f"{subject_id}_glass_brain_top{edge_pct}pct.png",
+                mime="image/png"
+            )
 
     # ---- ROW 4: DOWNLOAD ----
     st.divider()
+    st.subheader("Export")
+    st.markdown("""
+<div class="context-box">
+The <b>FC vector</b> (.npy) is the flattened upper triangle of the FC matrix &mdash; this is the feature vector
+fed into Ridge Regression to predict negative affect scores. For n=379 MMP parcels, this yields 71,631 features per subject.
+The batch pipeline (<code>run_batch_fc.py</code>) will save one such vector per subject to <code>~/surge/fc_vectors/</code>,
+which <code>predict_negaffect.py</code> will then assemble into the full feature matrix for modeling.
+</div>
+""", unsafe_allow_html=True)
+
     col_dl1, col_dl2, _ = st.columns([1, 1, 2])
     with col_dl1:
-        fc_bytes = fc_vector.astype(np.float32).tobytes()
         st.download_button(
             "Download FC vector (.npy)",
             data=fc_vector.astype(np.float32).tobytes(),
