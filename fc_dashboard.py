@@ -314,7 +314,82 @@ The negative tail reflects anticorrelated pairs, often seen between the default 
         })
         st.dataframe(stats_df, hide_index=True, use_container_width=True)
 
-    # ---- ROW 2: MOTION ----
+    # ---- ROW 2: NETWORK MATRIX PLOT ----
+    st.divider()
+    st.subheader("Network-level connectivity matrix (Yeo 7)")
+    st.markdown("""
+<div class="context-box">
+This matrix summarizes FC at the <b>network level</b> by grouping parcels into Yeo 7 resting-state networks
+(Visual, Somatomotor, Dorsal Attention, Ventral Attention, Limbic, Frontoparietal, Default Mode)
+and computing the mean Fisher-z within and between each pair. The diagonal = within-network FC;
+off-diagonal = between-network FC. Classic expected pattern: high DMN–DMN, high FPN–FPN,
+and the DMN–DAN anticorrelation. Directly comparable to Shen et al. (2017) matrix plots.
+</div>
+""", unsafe_allow_html=True)
+
+    @st.cache_data(show_spinner=False)
+    def build_network_matrix(z_key, parc_name):
+        # z_key is a hashable tuple version of the matrix shape + mean for cache keying
+        parc = parc_map[parc_name]
+        yeo_map = np.array(hcp.yeo7.map_all)
+        parcel_map_all = np.array(parc.map_all)
+        parc_ids = parc.nontrivial_ids
+
+        parcel_network = []
+        for pid in parc_ids:
+            mask = parcel_map_all == pid
+            vals = yeo_map[mask]
+            vals = vals[vals > 0]
+            parcel_network.append(int(np.bincount(vals).argmax()) if len(vals) > 0 else 0)
+        parcel_network = np.array(parcel_network)
+        return parcel_network
+
+    parcel_network = build_network_matrix(
+        (z_matrix.shape, float(z_matrix.mean())), parcellation_choice
+    )
+
+    net_names = ["Visual", "SomMot", "DorsAttn", "VentAttn", "Limbic", "FrontPar", "Default"]
+    net_ids = list(range(1, 8))
+    n_nets = len(net_ids)
+    net_matrix = np.zeros((n_nets, n_nets))
+    for i, ni in enumerate(net_ids):
+        for j, nj in enumerate(net_ids):
+            mi = parcel_network == ni
+            mj = parcel_network == nj
+            if mi.sum() == 0 or mj.sum() == 0:
+                continue
+            sub = z_matrix[np.ix_(mi, mj)]
+            if i == j:
+                triu = sub[np.triu_indices(sub.shape[0], k=1)]
+                net_matrix[i, j] = triu.mean() if len(triu) > 0 else 0
+            else:
+                net_matrix[i, j] = sub.mean()
+
+    fig_net = go.Figure(data=go.Heatmap(
+        z=net_matrix,
+        x=net_names,
+        y=net_names,
+        colorscale="RdBu_r",
+        zmid=0,
+        zmin=-0.5,
+        zmax=0.8,
+        showscale=True,
+        colorbar=dict(title="Mean Fisher-z", thickness=12),
+        text=np.round(net_matrix, 2),
+        texttemplate="%{text}",
+        textfont=dict(size=12)
+    ))
+    fig_net.update_layout(
+        height=420,
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis=dict(title="Network", tickangle=-30),
+        yaxis=dict(title="Network", autorange="reversed"),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)"
+    )
+    st.plotly_chart(fig_net, use_container_width=True)
+
+    # ---- ROW 3: MOTION ----
     if result["motion_per_run"]:
         st.divider()
         st.subheader("Head motion")
@@ -377,11 +452,20 @@ fingerprinting and behavioral prediction &mdash; look for dense clusters of edge
 </div>
 """, unsafe_allow_html=True)
 
-        edge_pct = st.slider(
-            "Show top X% strongest edges",
-            min_value=1, max_value=10, value=1, step=1,
-            help="Top 1% shows the ~716 strongest connections. Higher percentages reveal more of the network structure."
-        )
+        gb_col1, gb_col2 = st.columns([1, 1])
+        with gb_col1:
+            edge_pct = st.slider(
+                "Show top X% strongest edges",
+                min_value=1, max_value=20, value=1, step=1,
+                help="Top 1% = ~716 strongest connections. Higher % reveals more network structure."
+            )
+        with gb_col2:
+            network_filter = st.selectbox(
+                "Filter by network (show only edges involving this network)",
+                options=["All networks"] + net_names,
+                index=0,
+                help="Restricts displayed edges to those where at least one endpoint parcel belongs to the selected Yeo 7 network."
+            )
 
         with st.spinner("Rendering glass brain..."):
             centroids, _ = get_mmp_centroids()
@@ -394,6 +478,19 @@ fingerprinting and behavioral prediction &mdash; look for dense clusters of edge
 
             threshold = np.percentile(np.abs(fc_vector), 100 - edge_pct)
             adj = np.where(np.abs(fc_matrix) >= threshold, fc_matrix, 0.0)
+
+            # Apply network filter if selected
+            if network_filter != "All networks" and parcellation_choice == "MMP (360)":
+                net_idx = net_names.index(network_filter) + 1  # 1-indexed Yeo IDs
+                net_mask = parcel_network == net_idx  # shape (n_parcels,)
+                # Zero out any edge where neither endpoint is in the selected network
+                filter_matrix = np.zeros_like(adj)
+                for pi in range(n):
+                    for pj in range(pi + 1, n):
+                        if net_mask[pi] or net_mask[pj]:
+                            filter_matrix[pi, pj] = adj[pi, pj]
+                            filter_matrix[pj, pi] = adj[pj, pi]
+                adj = filter_matrix
 
             fig_gb, axes_gb = plt.subplots(1, 3, figsize=(15, 5), facecolor="black")
             for ax in axes_gb:
@@ -415,8 +512,9 @@ fingerprinting and behavioral prediction &mdash; look for dense clusters of edge
                     alpha=0.7,
                 )
 
+            net_label = f" · {network_filter}" if network_filter != "All networks" else ""
             plt.suptitle(
-                f"Top {edge_pct}% FC edges — Subject {subject_id} (MMP 379 parcels)",
+                f"Top {edge_pct}% FC edges — Subject {subject_id} (MMP 379 parcels){net_label}",
                 color="white", fontsize=13, y=1.01
             )
             plt.tight_layout()
