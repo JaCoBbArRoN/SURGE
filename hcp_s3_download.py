@@ -29,8 +29,10 @@ Prerequisites:
 
 import os
 import argparse
+import time
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.exceptions import ConnectTimeoutError
 import pandas as pd
 from pathlib import Path
 
@@ -86,20 +88,30 @@ def download_file(s3_client, subject_id, run, filename, out_dir, dry_run=False):
 
     os.makedirs(os.path.dirname(dest), exist_ok=True)
 
-    try:
-        # Get file size for progress display
-        head = s3_client.head_object(Bucket=BUCKET, Key=key)
-        size_mb = head["ContentLength"] / 1e6
-        print(f"    ↓ {filename} ({size_mb:.0f} MB)...", end=" ", flush=True)
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            head = s3_client.head_object(Bucket=BUCKET, Key=key)
+            size_mb = head["ContentLength"] / 1e6
+            if attempt == 1:
+                print(f"    ↓ {filename} ({size_mb:.0f} MB)...", end=" ", flush=True)
+            else:
+                print(f"    ↓ retry {attempt}/{max_retries}...", end=" ", flush=True)
 
-        s3_client.download_file(BUCKET, key, dest)
-        print("✓")
-        return True
+            s3_client.download_file(BUCKET, key, dest)
+            print("✓")
+            return True
 
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        print(f"    ✗ FAILED ({code}): {key}")
-        return False
+        except Exception as e:
+            if os.path.exists(dest):
+                os.remove(dest)
+            if attempt < max_retries:
+                wait = 5 * attempt
+                print(f"\n    [network error, waiting {wait}s before retry]", flush=True)
+                time.sleep(wait)
+            else:
+                print(f"\n    ✗ FAILED after {max_retries} attempts: {filename}")
+                return False
 
 
 def download_subject(s3_client, subject_id, out_dir, dry_run=False):
